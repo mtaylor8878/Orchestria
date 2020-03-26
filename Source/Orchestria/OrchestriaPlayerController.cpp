@@ -4,8 +4,7 @@
 
 AOrchestriaPlayerController::AOrchestriaPlayerController()
 {
-	bShowMouseCursor = true;
+	bShowMouseCursor = false;
 	bEnableClickEvents = true;
 	bEnableTouchEvents = true;
-	DefaultMouseCursor = EMouseCursor::Crosshairs;
 }

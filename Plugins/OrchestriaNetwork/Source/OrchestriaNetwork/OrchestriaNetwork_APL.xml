@@ -1,0 +1,872 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--GearVR plugin additions-->
+<root xmlns:android="http://schemas.android.com/apk/res/android">
+	<!-- init section is always evaluated once per architecture -->
+	<trace enable="true"/>
+	<init>
+		<log text="OrchestriaNetwork init"/>		
+	</init>
+
+  <androidManifestUpdates>
+    <addElements tag="application">
+	  
+	  <activity android:name="com.matttaylor.androidapi.OrchestriaNetworkActivity"
+          android:configChanges="keyboard|keyboardHidden|screenLayout|screenSize|orientation"
+          android:label="@string/app_name" />
+		  
+    </addElements>
+
+		
+  </androidManifestUpdates>
+
+  <!-- optional additions to proguard -->
+  <proguardAdditions>
+    <insert><![CDATA[
+      -keepattributes Signature
+      -dontskipnonpubliclibraryclassmembers
+
+     -keepclassmembers class com.epicgames.ue4.GameActivity {
+            public <methods>;
+            public <fields>;
+     }
+    ]]></insert>
+  </proguardAdditions>
+
+  <resourceCopies>
+    <!-- Copy the generated resource file to be packaged -->
+  </resourceCopies>
+
+  <AARImports>
+  </AARImports>
+  
+  <!-- optional additions to the GameActivity imports in GameActivity.java -->
+	<gameActivityImportAdditions>
+	  <insert>
+      import java.lang.Math;
+      import java.nio.ByteBuffer;
+      import java.util.HashSet;
+      import java.util.Arrays;
+      import java.util.ArrayList;
+      import android.Manifest;
+      import android.text.TextUtils;
+      import android.graphics.BitmapFactory;
+      import android.os.Handler;
+      import android.os.Build.VERSION;
+      import android.os.SystemClock;
+      import android.util.Log;
+      import android.widget.Toast;
+      import com.google.android.gms.nearby.Nearby;
+      import com.google.android.gms.nearby.connection.AdvertisingOptions;
+      import com.google.android.gms.nearby.connection.ConnectionInfo;
+      import com.google.android.gms.nearby.connection.ConnectionLifecycleCallback;
+      import com.google.android.gms.nearby.connection.ConnectionResolution;
+      import com.google.android.gms.nearby.connection.ConnectionsClient;
+      import com.google.android.gms.nearby.connection.DiscoveredEndpointInfo;
+      import com.google.android.gms.nearby.connection.DiscoveryOptions;
+      import com.google.android.gms.nearby.connection.EndpointDiscoveryCallback;
+      import com.google.android.gms.nearby.connection.Payload;
+      import com.google.android.gms.nearby.connection.PayloadCallback;
+      import com.google.android.gms.nearby.connection.PayloadTransferUpdate;
+      import com.google.android.gms.nearby.connection.PayloadTransferUpdate.Status;
+      import com.google.android.gms.nearby.connection.Strategy;
+      import com.google.android.gms.tasks.OnFailureListener;
+      import com.google.android.gms.tasks.OnSuccessListener;
+    </insert>
+	</gameActivityImportAdditions>
+	
+
+	<!-- optional additions to the GameActivity class in GameActivity.java -->
+	<gameActivityClassAdditions>
+		<insert>
+		<![CDATA[
+    private SensorManager mSensorManager;
+    private Sensor mLight;
+    private SensorEventListener mSensorListener;
+    private float mLastLightMeasure;
+    
+    public void AndroidThunkJava_AndroidAPI_GetLastLightMeasure(float[] light) {
+      light[0] = mLastLightMeasure;
+    }
+    
+    ///////////////////////////////////////////////////////////////////////////////
+    
+    // Declare plugin specific types
+    private static final Strategy CONNECTION_STRATEGY = Strategy.P2P_STAR;
+    private static final String LOG_TAG = ">>>>>>>>>>>>>>> OrchestriaNetwork: ";
+    private static final String UNIQUE_NAME = "com.MattTaylor.Orchestria";
+    private static final int BUFFER_SIZE = 576;
+    private static final long AVG_FACTOR = 3;
+    private static final long MIN_SAMPLES = 120;
+    
+    private static final int REQUEST_CODE_PERMISSIONS = 1;
+    private static final String[] REQUIRED_PERMISSIONS = new String[] {
+      Manifest.permission.BLUETOOTH,
+      Manifest.permission.BLUETOOTH_ADMIN,
+      Manifest.permission.ACCESS_WIFI_STATE,
+      Manifest.permission.CHANGE_WIFI_STATE,
+      Manifest.permission.ACCESS_COARSE_LOCATION,
+    };
+
+    private static final String[] REQUIRED_PERMISSIONS_10_PLUS = new String[] {
+      Manifest.permission.BLUETOOTH,
+      Manifest.permission.BLUETOOTH_ADMIN,
+      Manifest.permission.ACCESS_WIFI_STATE,
+      Manifest.permission.CHANGE_WIFI_STATE,
+      Manifest.permission.ACCESS_FINE_LOCATION,
+    };
+
+    private static final int MAX_CONNECTIONS = 4;
+    private enum NetworkRole {
+      UNDECIDED,
+      HOST,
+      CLIENT
+    }
+    private enum RequestStatus {
+      IDLE,
+      AWAITING_RESPONSE,
+      SUCCESS,
+      FAILURE
+    }
+    private enum PacketType {
+      CLIENT_LIST,
+      ROLE_REQUEST,
+      ROLES_UPDATE,
+      SCORE_UPDATE,
+      SCORE_REPORT,
+      START_GAME,
+      READY_REPORT,
+      BEGIN_SONG,
+      PING,
+      PONG
+    }
+    private enum GameState {
+      MENU,
+      LOADING,
+      GAMEPLAY
+    }
+    
+    private class ConnectionData {
+      public String endpointId;
+      public String name;
+
+      public ConnectionData() {
+        endpointId = "";
+        name = "";
+      }
+    }
+    
+    // Declare private members
+    private int synchronizedScore;
+    private ConnectionsClient connectionsClient;
+    private ConnectionData[] activeConnections;
+    private NetworkRole role;
+    private String playerName;
+    private RequestStatus connectToHostStatus;
+    private int[] playerRoles;
+    private GameState gameState;
+    private boolean[] readyStatus;
+    private float startGameDelay;
+    
+    private float[] averageRTT;
+    private long[] rttSampleCount;
+    
+    private void resetGame() {
+      synchronizedScore = 0;
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        playerRoles[i] = 0;
+      }
+    }
+    
+    private boolean roleNotPicked(int roleId) {
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        if(playerRoles[i] == roleId) {
+          return false;
+        }
+      }
+      return true;
+    }
+    
+    private boolean allPlayersReady() {
+      for(int i = 0; i < MAX_CONNECTIONS - 1; i++) {
+        if(readyStatus[i] == false && activeConnections[i].endpointId.length() > 0 && rttSampleCount[i] >= MIN_SAMPLES) {
+          return false;
+        }
+      }
+      return readyStatus[MAX_CONNECTIONS-1];
+    }
+    
+    private void startSong() {
+      float largest = 0;
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        if(activeConnections[i].endpointId.length() > 0 && averageRTT[i] > largest) {
+          largest = averageRTT[i];
+        }
+      }
+      
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        if(activeConnections[i].endpointId.length() > 0) {
+          connectionsClient.sendPayload(activeConnections[i].endpointId, Payload.fromBytes(getBeginSongPacket((largest - averageRTT[i]) / 2000)));
+        }
+      }
+      
+      startGameDelay = largest / 2000;
+      gameState = GameState.GAMEPLAY;
+    }
+    
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // Network Utilities
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    
+    private boolean hasConnection(String endpoint) {
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        if(activeConnections[i].endpointId.equals(endpoint)) {
+            return true;
+        }
+      }
+      return false;
+    }
+    
+    private void removeConnection(String endpoint) {
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        if(activeConnections[i].endpointId.equals(endpoint)) {
+          Log.debug(LOG_TAG + "Removed connection data on endpoint: " + activeConnections[i].name);
+          activeConnections[i].endpointId = "";
+          activeConnections[i].name = "";
+          playerRoles[i] = 0;
+          rttSampleCount[i] = 0;
+          averageRTT[i] = 0;
+        }
+      }
+      
+      if(role == NetworkRole.HOST) {
+        broadcastToClients(getClientListPacket());
+      }
+    }
+    
+    private void addConnection(String endpoint, String name) {
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        if(activeConnections[i].endpointId == "") {
+          Log.debug(LOG_TAG + "Added connection data: [" + endpoint + ", " + name + "]");
+          activeConnections[i].endpointId = endpoint;
+          activeConnections[i].name = name;
+          
+          if(role == NetworkRole.HOST) {
+            broadcastToClients(getClientListPacket());
+          }
+          return;
+        }
+      }
+    }
+    
+    private void clearConnections() {
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        activeConnections[i].endpointId = "";
+        activeConnections[i].name = "";
+        playerRoles[i] = 0;
+      }
+    }
+    
+    private ConnectionData getConnection(String endpointId) {
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        if(activeConnections[i].endpointId.equals(endpointId)) {
+          return activeConnections[i];
+        }
+      }
+      return new ConnectionData();
+    }
+    
+    private void broadcastToClients(byte[] packetData) {
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        if(activeConnections[i].endpointId.length() > 0) {
+          Log.debug(LOG_TAG + "Sending packet to " + activeConnections[i].endpointId);
+          connectionsClient.sendPayload(activeConnections[i].endpointId, Payload.fromBytes(packetData));
+        }
+      }
+    }
+    
+    private void sendToHost(byte[] packetData) {
+      if(role == NetworkRole.CLIENT) {
+        connectionsClient.sendPayload(activeConnections[0].endpointId, Payload.fromBytes(packetData));
+      }
+    }
+    
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // Packet Getters
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    
+    private byte[] getClientListPacket() {
+      byte[] packetData = new byte[BUFFER_SIZE];
+      ByteBuffer buff = ByteBuffer.wrap(packetData);
+      
+      buff.putInt(PacketType.CLIENT_LIST.ordinal());
+      for(int i = 0; i < MAX_CONNECTIONS - 1; i++) {
+        putString(buff, activeConnections[i].endpointId);
+        putString(buff, activeConnections[i].name);      
+      }
+      
+      return packetData;
+    }
+    
+    private byte[] getRolesUpdatePacket() {
+      byte[] packetData = new byte[Integer.SIZE * (1 + MAX_CONNECTIONS) / 8];
+      ByteBuffer buff = ByteBuffer.wrap(packetData);
+      
+      buff.putInt(PacketType.ROLES_UPDATE.ordinal());
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        buff.putInt(playerRoles[i]);
+      }
+      
+      return packetData;
+    }
+    
+    private byte[] getRoleRequestPacket(int requestedRole) {
+      byte[] packetData = new byte[Integer.SIZE * 2 / 8];
+      ByteBuffer buff = ByteBuffer.wrap(packetData);
+      
+      buff.putInt(PacketType.ROLE_REQUEST.ordinal());
+      buff.putInt(requestedRole);
+      
+      return packetData;
+    }
+    
+    private byte[] getScoreUpdatePacket() {
+      byte[] packetData = new byte[Integer.SIZE * 2 / 8];
+      ByteBuffer buff = ByteBuffer.wrap(packetData);
+      
+      buff.putInt(PacketType.SCORE_UPDATE.ordinal());
+      buff.putInt(synchronizedScore);
+      
+      return packetData;
+    }
+    
+    private byte[] getScoreReportPacket(int value) {
+      byte[] packetData = new byte[Integer.SIZE * 2 / 8];
+      ByteBuffer buff = ByteBuffer.wrap(packetData);
+      
+      buff.putInt(PacketType.SCORE_REPORT.ordinal());
+      buff.putInt(value);
+      
+      return packetData;
+    }
+    
+    private byte[] getStartGamePacket() {
+      byte[] packetData = new byte[Integer.SIZE / 8];
+      ByteBuffer buff = ByteBuffer.wrap(packetData);
+      
+      buff.putInt(PacketType.START_GAME.ordinal());
+      
+      return packetData;
+    }
+    
+    private byte[] getReadyReportPacket() {
+      byte[] packetData = new byte[Integer.SIZE / 8];
+      ByteBuffer buff = ByteBuffer.wrap(packetData);
+      
+      buff.putInt(PacketType.READY_REPORT.ordinal());
+      
+      return packetData;
+    }
+    
+    private byte[] getBeginSongPacket(float avgPing) {
+      byte[] packetData = new byte[(Integer.SIZE + Float.SIZE) / 8];
+      ByteBuffer buff = ByteBuffer.wrap(packetData);
+      
+      buff.putInt(PacketType.BEGIN_SONG.ordinal());
+      buff.putFloat(avgPing);
+      
+      return packetData;
+    }
+    
+    private byte[] getPingPacket() {
+      byte[] packetData = new byte[(Integer.SIZE + Long.SIZE) / 8];
+      ByteBuffer buff = ByteBuffer.wrap(packetData);
+      
+      buff.putInt(PacketType.PING.ordinal());
+      buff.putLong(SystemClock.elapsedRealtime());
+      
+      return packetData;
+    }
+    
+    private byte[] getPongPacket(long timestamp) {
+      byte[] packetData = new byte[(Integer.SIZE + Long.SIZE) / 8];
+      ByteBuffer buff = ByteBuffer.wrap(packetData);
+      
+      buff.putInt(PacketType.PONG.ordinal());
+      buff.putLong(timestamp);
+      
+      return packetData;
+    }
+    
+    private void putString(ByteBuffer buffer, String string) {
+      byte[] stringBytes = string.getBytes();
+      buffer.putInt(stringBytes.length);
+      buffer.put(stringBytes);
+    }
+    
+    private String getString(ByteBuffer buffer) {
+      int len = buffer.getInt();
+      byte[] stringBytes = new byte[len];
+      buffer.get(stringBytes);
+      return new String(stringBytes);
+    }
+    
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // Callback Definitions
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    
+    // Callback for receiving payloads
+    private final PayloadCallback payloadCallback = new PayloadCallback() {
+        @Override
+        public void onPayloadReceived(String endpointId, Payload payload) {
+          ByteBuffer buff = ByteBuffer.wrap(payload.asBytes());
+          
+          if(role == NetworkRole.CLIENT) {
+            switch(PacketType.values()[buff.getInt()]) {
+              case CLIENT_LIST:
+                for(int i = 0; i < MAX_CONNECTIONS - 1; i++) {
+                  activeConnections[1 + i].endpointId = getString(buff);
+                  activeConnections[1 + i].name = getString(buff);              
+                }
+                break;
+              case ROLES_UPDATE:
+                for(int i = 0; i < MAX_CONNECTIONS; i++) {
+                  playerRoles[i] = buff.getInt();            
+                }
+                break;
+              case SCORE_UPDATE:
+                synchronizedScore = buff.getInt();
+                break;
+              case START_GAME:
+                gameState = GameState.LOADING;
+                break;
+              case BEGIN_SONG:
+                startGameDelay = buff.getFloat();
+                gameState = GameState.GAMEPLAY;
+                break;
+              case PING:
+                sendToHost(getPongPacket(buff.getLong()));
+                break;
+              default:
+                Log.debug(LOG_TAG + "Unknown packet received");
+            }
+          } else if(role == NetworkRole.HOST) {
+            switch(PacketType.values()[buff.getInt()]) {
+              case ROLE_REQUEST:
+                int requestedRole = buff.getInt();
+                if(!roleNotPicked(requestedRole)) {
+                  break;
+                }
+                
+                for(int i = 0; i < MAX_CONNECTIONS; i++) {
+                  if(activeConnections[i].endpointId.equals(endpointId)) {
+                    playerRoles[i] = requestedRole;
+                    broadcastToClients(getRolesUpdatePacket());
+                    break;
+                  }
+                }
+                break;
+              case SCORE_REPORT:
+                synchronizedScore += buff.getInt();
+                broadcastToClients(getScoreUpdatePacket());
+                break;
+              case READY_REPORT:
+                for(int i = 0; i < MAX_CONNECTIONS; i++) {
+                  if(activeConnections[i].endpointId.equals(endpointId)) {
+                    readyStatus[i] = true;
+                    break;
+                  }
+                }
+                
+                if(allPlayersReady()) {
+                  startSong();
+                }
+                break;
+              case PONG:
+                long diff = SystemClock.elapsedRealtime() - buff.getLong();
+                for(int i = 0; i < MAX_CONNECTIONS; i++) {
+                  if(activeConnections[i].endpointId.equals(endpointId)) {
+                    rttSampleCount[i]++;
+                    averageRTT[i] += (diff - averageRTT[i]) / Math.min(rttSampleCount[i], AVG_FACTOR);
+                    break;
+                  }
+                }
+                
+                if(gameState == GameState.LOADING) {
+                  if(allPlayersReady()) {
+                    startSong();
+                  } else {
+                    connectionsClient.sendPayload(endpointId, Payload.fromBytes(getPingPacket()));
+                  }
+                }
+                break;
+              default:
+                Log.debug(LOG_TAG + "Unknown packet received");
+            }
+          }
+        }
+
+        @Override
+        public void onPayloadTransferUpdate(String endpointId, PayloadTransferUpdate update) {
+          if(update.getStatus() == Status.FAILURE) {
+            Log.debug(LOG_TAG + "Failed to transfer packet to " + endpointId);
+          }
+        }
+      };
+    
+    // Callback for finding devices
+    private final EndpointDiscoveryCallback endpointDiscoveryCallback = new EndpointDiscoveryCallback() {
+      @Override
+      public void onEndpointFound(String endpointId, DiscoveredEndpointInfo info) {
+        Log.debug(LOG_TAG + "Found endpoint: [" + info.getEndpointName() + "]");
+
+        if(!hasConnection(endpointId)) {
+          addConnection(endpointId, info.getEndpointName());
+        }
+      }
+      
+      @Override
+      public void onEndpointLost(String endpointId) {
+        removeConnection(endpointId);
+      }
+    };
+    
+    // Callback for connecting to devices
+    private final ConnectionLifecycleCallback connectionLifecycleCallback = 
+      new ConnectionLifecycleCallback() {
+        @Override
+        public void onConnectionInitiated(String endpointId, ConnectionInfo connectionInfo) {
+          Log.debug(LOG_TAG + "Accepting connection from " + connectionInfo.getEndpointName());
+          connectionsClient.acceptConnection(endpointId, payloadCallback);
+          
+          if(role == NetworkRole.HOST) {
+            addConnection(endpointId, connectionInfo.getEndpointName());
+          }
+        }
+      
+        @Override
+        public void onConnectionResult(String endpointId, ConnectionResolution result) {
+          if(!result.getStatus().isSuccess()) {
+            Log.error(LOG_TAG + "Connection to " + endpointId + " failed");
+            if(role == NetworkRole.CLIENT) {
+              connectToHostStatus = RequestStatus.FAILURE;
+            } else if(role == NetworkRole.HOST) {
+              removeConnection(endpointId);
+            }
+            return;
+          }
+          
+          Log.debug(LOG_TAG + "Connection to " + endpointId + " successful");
+          if(role == NetworkRole.CLIENT) {
+            connectToHostStatus = RequestStatus.SUCCESS;
+            String hostEP = endpointId;
+            String hostName = getConnection(endpointId).name;
+              
+            connectionsClient.stopDiscovery();
+            clearConnections();
+              
+            addConnection(hostEP, hostName);
+          } else if(role == NetworkRole.HOST) {
+            connectionsClient.sendPayload(endpointId, Payload.fromBytes(getClientListPacket()));
+            connectionsClient.sendPayload(endpointId, Payload.fromBytes(getRolesUpdatePacket()));
+          }
+        }
+      
+        @Override
+        public void onDisconnected(String endpointId) {
+          removeConnection(endpointId);
+        }
+      };
+      
+    private boolean hasPermissions(Context context, String... permissions) {
+      for (String permission : permissions) {
+        if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+          Log.debug(LOG_TAG + "Don't have permission: " + permission);
+          return false;
+        }
+      }
+      Log.debug(LOG_TAG + "All permissions available");
+      return true;
+    }
+    
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+      super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+      if (requestCode != REQUEST_CODE_PERMISSIONS) {
+        return;
+      }
+
+      for (int grantResult : grantResults) {
+        if (grantResult == PackageManager.PERMISSION_DENIED) {
+          Log.error(LOG_TAG + "Missing permissions");
+          finish();
+          return;
+        }
+      }
+    }
+    
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // API Callable Methods
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    
+    public void AndroidThunkJava_AndroidAPI_StartAdvertising() {
+      role = NetworkRole.HOST;
+      connectionsClient.startAdvertising(playerName, getPackageName(), connectionLifecycleCallback, new AdvertisingOptions(CONNECTION_STRATEGY))
+        .addOnSuccessListener(new OnSuccessListener<Void>() {
+          public void onSuccess(Void unusedResult) {
+            Log.debug(LOG_TAG + "Started advertising as: " + playerName);
+          }
+        })
+        .addOnFailureListener(new OnFailureListener() {
+          public void onFailure(Exception e) {
+            Log.error(LOG_TAG + "Failed to start advertising: " + e.getMessage()); 
+          }
+        });
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_StartDiscovery() {
+      role = NetworkRole.CLIENT;
+      connectionsClient.startDiscovery(getPackageName(), endpointDiscoveryCallback, new DiscoveryOptions(CONNECTION_STRATEGY))
+        .addOnSuccessListener(new OnSuccessListener<Void>() {
+          public void onSuccess(Void unusedResult) {
+            Log.debug(LOG_TAG + "Started discovering!");
+          }
+        })
+        .addOnFailureListener(new OnFailureListener() {
+          public void onFailure(Exception e) {
+            Log.error(LOG_TAG + "Failed to start discovering: " + e.getMessage()); 
+          }
+        });
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_GetConnectionList(String[] connections) {
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        connections[i*2] = activeConnections[i].endpointId;
+        connections[i*2+1] = activeConnections[i].name;
+      }
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_SetPlayerName(String name) {
+      Log.debug(LOG_TAG + "Updated name to " + name);
+      playerName = name;
+    }
+
+    public void AndroidThunkJava_AndroidAPI_RequestConnection(String endpointId) {
+      Log.debug(LOG_TAG + "Requesting connection to " + endpointId);
+      connectionsClient.requestConnection(playerName, endpointId, connectionLifecycleCallback);
+      connectToHostStatus = RequestStatus.AWAITING_RESPONSE;
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_RequestConnectionStatus(int[] result) {
+      result[0] = connectToHostStatus.ordinal();
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_Disconnect() {
+      clearConnections();
+      connectionsClient.stopAdvertising();
+      connectionsClient.stopDiscovery();
+      connectionsClient.stopAllEndpoints();
+      resetGame();
+      role = NetworkRole.UNDECIDED;
+      
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_UpdateClients() {
+      if(role == NetworkRole.HOST) {
+        // TODO
+      } else {
+        Log.error(LOG_TAG + "Trying to update when not hosting");
+      }
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_RequestRole(int requestedRole) {
+      if(role == NetworkRole.CLIENT) {
+        sendToHost(getRoleRequestPacket(requestedRole));
+      } else {
+        Log.error(LOG_TAG + "Requesting when you're not a client");
+      }
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_SetHostRole(int requestedRole) {
+      if(role == NetworkRole.HOST) {
+        if(roleNotPicked(requestedRole)) {
+          Log.debug(LOG_TAG + "Set Host Role to " + requestedRole);
+          playerRoles[MAX_CONNECTIONS - 1] = requestedRole;
+          broadcastToClients(getRolesUpdatePacket());
+        } else {
+          Log.debug(LOG_TAG + "Role " + requestedRole + " is already taken");
+        }
+      } else {
+        Log.error(LOG_TAG + "Trying to set role when not hosting");
+      }
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_GetRoles(int[] returnRoles) {
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        returnRoles[i] = playerRoles[i];
+      }
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_StartGame() {
+      if(role != NetworkRole.HOST) {
+        Log.error(LOG_TAG + "Trying to start game when not hosting");
+        return;
+      }
+      
+      connectionsClient.stopAdvertising();
+      gameState = GameState.LOADING;
+      for(int i = 0; i < MAX_CONNECTIONS; i++) {
+        readyStatus[i] = false;
+      }
+      broadcastToClients(getStartGamePacket());
+      broadcastToClients(getPingPacket());
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_ReportReady() {
+      switch(role) {
+        case HOST:
+          readyStatus[MAX_CONNECTIONS - 1] = true;
+          if(allPlayersReady()) {
+            startSong();
+          }
+          break;
+        case CLIENT:
+          sendToHost(getReadyReportPacket());
+          break;
+        default:
+          Log.error(LOG_TAG + "Undecided role reporting ready");
+      }
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_GetGameState(int[] currentState) {
+      currentState[0] = gameState.ordinal();
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_GetStartDelay(float[] delayVal) {
+      delayVal[0] = startGameDelay;
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_GetScore(int[] currentScore) {
+      currentScore[0] = synchronizedScore;
+    }
+    
+    public void AndroidThunkJava_AndroidAPI_ReportScore(int reportedScore) {
+      if(role == NetworkRole.HOST) {
+        synchronizedScore += reportedScore;
+        broadcastToClients(getScoreUpdatePacket());
+      } else {
+        sendToHost(getScoreReportPacket(reportedScore));
+      }
+    }
+    ]]>
+		</insert>
+	</gameActivityClassAdditions>
+	
+	<!-- optional additions to GameActivity onCreate metadata reading in GameActivity.java -->
+	<gameActivityReadMetadataAdditions>
+	<insert>
+
+  </insert>
+	</gameActivityReadMetadataAdditions>
+	
+	<!-- optional additions to GameActivity onCreate in GameActivity.java -->
+	<gameActivityOnCreateAdditions>
+		<insert>
+		<![CDATA[
+    mSensorManager = (SensorManager)getSystemService(SENSOR_SERVICE);
+    mLight = mSensorManager.getDefaultSensor(Sensor.TYPE_LIGHT);
+    
+    mSensorListener = new SensorEventListener() {
+      public void onAccuracyChanged(Sensor sensor, int accuracy) {
+        //
+      }
+      
+      public void onSensorChanged(SensorEvent event) {
+        if(event.sensor == mLight) {
+          mLastLightMeasure = event.values[0];
+        }
+      }
+    };
+    
+    connectionsClient = Nearby.getConnectionsClient(this);
+    role = NetworkRole.UNDECIDED;
+    connectToHostStatus = RequestStatus.IDLE;
+    playerName = "UNSET_NAME";
+    gameState = GameState.MENU;
+    
+    activeConnections = new ConnectionData[MAX_CONNECTIONS];
+    for(int i = 0; i < MAX_CONNECTIONS; i++) {
+      activeConnections[i] = new ConnectionData();
+    }
+    
+    playerRoles = new int[MAX_CONNECTIONS];
+    readyStatus = new boolean[MAX_CONNECTIONS];
+    averageRTT = new float[MAX_CONNECTIONS];
+    rttSampleCount = new long[MAX_CONNECTIONS];
+
+		]]>
+		</insert>
+	</gameActivityOnCreateAdditions>
+
+	<!-- optional additions to GameActivity onDestroy in GameActivity.java -->
+	<gameActivityOnDestroyAdditions>
+		<insert>
+		
+		</insert>
+	</gameActivityOnDestroyAdditions>
+	
+	
+	<!-- optional additions to GameActivity onStart in GameActivity.java -->
+	<gameActivityOnStartAdditions>
+		<insert>
+    <![CDATA[
+    String[] permissions = (Build.VERSION.SDK_INT >= 10) ? REQUIRED_PERMISSIONS_10_PLUS : REQUIRED_PERMISSIONS;
+
+    if(!hasPermissions(this, permissions)) {
+      requestPermissions(permissions, REQUEST_CODE_PERMISSIONS);
+    }
+    ]]>
+		</insert>
+	</gameActivityOnStartAdditions>
+
+	<!-- optional additions to GameActivity onStop in GameActivity.java -->
+	<gameActivityOnStopAdditions>
+		<insert>
+      <![CDATA[
+      connectionsClient.stopAllEndpoints();
+      ]]>
+		</insert>
+	</gameActivityOnStopAdditions>
+	
+
+	<!-- optional additions to GameActivity onPause in GameActivity.java	-->
+	<gameActivityOnPauseAdditions>
+    <insert>
+    <![CDATA[
+      mSensorManager.registerListener(mSensorListener, mLight, SensorManager.SENSOR_DELAY_UI);
+    ]]>
+    </insert>
+  </gameActivityOnPauseAdditions>
+
+
+  <!-- optional additions to GameActivity onResume in GameActivity.java	-->
+  <gameActivityOnResumeAdditions>
+    <insert>
+    <![CDATA[
+      mSensorManager.registerListener(mSensorListener, mLight, SensorManager.SENSOR_DELAY_UI);
+    ]]>
+    </insert>
+  </gameActivityOnResumeAdditions>
+
+
+	<!-- optional additions to GameActivity onActivityResult in GameActivity.java -->
+	<gameActivityOnActivityResultAdditions>
+		<insert>
+		</insert>
+    </gameActivityOnActivityResultAdditions>
+	
+
+	<!-- optional libraries to load in GameActivity.java before libUE4.so -->
+	<soLoadLibrary>
+		<!-- need this if plugin enabled and supported architecture, even if not packaged for GearVR -->
+	</soLoadLibrary>
+</root>
